@@ -24,7 +24,7 @@ from defaults import *
 
 sys.path.insert(0, POISSON_BLENDING_DIR)
 sys.path.insert(0, PYBLUR_DIR)
-from pb import *
+import pb
 import pyblur
 
 Rectangle = namedtuple("Rectangle", "xmin ymin xmax ymax")
@@ -407,10 +407,10 @@ def create_image_anno(
                     img_mask = PIL2array1C(mask)
                     img_src = PIL2array3C(foreground).astype(np.float64)
                     img_target = PIL2array3C(backgrounds[i])
-                    img_mask, img_src, offset_adj = create_mask(
+                    img_mask, img_src, offset_adj = pb.create_mask(
                         img_mask.astype(np.float64), img_target, img_src, offset=offset
                     )
-                    background_array = poisson_blend(
+                    background_array = pb.poisson_blend(
                         img_mask,
                         img_src,
                         img_target,
