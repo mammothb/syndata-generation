@@ -87,3 +87,6 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+output_dir/**/*.jpg
+output_dir/**/*.xml
