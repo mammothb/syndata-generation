@@ -5,14 +5,11 @@ import os
 import random
 import signal
 import sys
-import time
-import xml.dom.minidom
 
 from collections import namedtuple
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
-from xml.etree.ElementTree import Element, SubElement, tostring
 
 import cv2
 import numpy as np
@@ -323,7 +320,8 @@ def create_image_anno(
     all_objects = objects + distractor_objects
     assert len(all_objects) > 0
     while True:
-        top = Element("annotation")
+        # top = Element("annotation")
+        boxes = []
         background = Image.open(bg_file)
         background = background.resize((w, h), Image.ANTIALIAS)
         backgrounds = []
@@ -432,21 +430,17 @@ def create_image_anno(
                     )
             if idx >= len(objects):
                 continue
-            object_root = SubElement(top, "object")
-            object_type = obj[1]
-            object_type_entry = SubElement(object_root, "name")
-            object_type_entry.text = str(object_type)
-            object_bndbox_entry = SubElement(object_root, "bndbox")
-            x_min_entry = SubElement(object_bndbox_entry, "xmin")
-            x_min_entry.text = "%d" % (max(1, x + xmin))
-            x_max_entry = SubElement(object_bndbox_entry, "xmax")
-            x_max_entry.text = "%d" % (min(w, x + xmax))
-            y_min_entry = SubElement(object_bndbox_entry, "ymin")
-            y_min_entry.text = "%d" % (max(1, y + ymin))
-            y_max_entry = SubElement(object_bndbox_entry, "ymax")
-            y_max_entry.text = "%d" % (min(h, y + ymax))
-            difficult_entry = SubElement(object_root, "difficult")
-            difficult_entry.text = "0"  # Add heuristic to estimate difficulty later on
+            x_min = max(1, x + xmin)
+            x_max = min(w, x + xmax)
+            y_min = max(1, y + ymin)
+            y_max = min(h, y + ymax)
+            boxes.append(
+                f"{str(obj[1])} "
+                f"{(x_min + x_max) / 2 / w} "
+                f"{(y_min + y_max) / 2 / h} "
+                f"{(x_max - x_min) / w} "
+                f"{(y_max - y_min) / h}"
+            )
         if attempt == MAX_ATTEMPTS_TO_SYNTHESIZE:
             continue
         else:
@@ -456,9 +450,8 @@ def create_image_anno(
             backgrounds[i] = LinearMotionBlur3C(PIL2array3C(backgrounds[i]))
         backgrounds[i].save(img_file.replace("none", blending_list[i]))
 
-    xmlstr = xml.dom.minidom.parseString(tostring(top)).toprettyxml(indent="    ")
     with open(anno_file, "w") as f:
-        f.write(xmlstr)
+        f.write("\n".join(boxes))
 
 
 def gen_syn_data(
@@ -536,7 +529,7 @@ def gen_syn_data(
         bg_file = random.choice(background_files)
         for blur in BLENDING_LIST:
             img_file = os.path.join(img_dir, "%i_%s.jpg" % (idx, blur))
-            anno_file = os.path.join(anno_dir, "%i.xml" % idx)
+            anno_file = os.path.join(anno_dir, "%i.txt" % idx)
             params = (objects, distractor_objects, img_file, anno_file, bg_file)
             params_list.append(params)
             img_files.append(img_file)
