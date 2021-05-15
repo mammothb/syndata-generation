@@ -90,3 +90,8 @@ ENV/
 
 output_dir/**/*.jpg
 output_dir/**/*.xml
+*.jpg
+*.pbm
+*.png
+*.txt
+*.xml
