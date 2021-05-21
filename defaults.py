@@ -11,7 +11,7 @@ DISTRACTOR_GLOB_STRING = "*.jpg"
 INVERTED_MASK = True  # Set to true if white pixels represent background
 
 # Parameters for generator
-NUMBER_OF_WORKERS = 8
+NUMBER_OF_WORKERS = 6
 BLENDING_LIST = ["box", "gaussian", "motion", "none", "poisson"]
 
 # Parameters for images
