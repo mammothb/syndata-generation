@@ -5,7 +5,6 @@ import os
 import random
 import signal
 import sys
-
 from collections import namedtuple
 from functools import partial
 from multiprocessing import Pool
@@ -14,36 +13,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 import scipy
-
+import yaml
 from PIL import Image
 
-from defaults import (
-    BACKGROUND_DIR,
-    BACKGROUND_GLOB_STRING,
-    BLENDING_LIST,
-    DISTRACTOR_DIR,
-    DISTRACTOR_GLOB_STRING,
-    DISTRACTOR_LIST_FILE,
-    HEIGHT,
-    INVERTED_MASK,
-    MAX_ALLOWED_IOU,
-    MAX_ATTEMPTS_TO_SYNTHESIZE,
-    MAX_DEGREES,
-    MAX_NO_OF_DISTRACTOR_OBJECTS,
-    MAX_NO_OF_OBJECTS,
-    MAX_SCALE,
-    MAX_TRUNCATION_FRACTION,
-    MIN_HEIGHT,
-    MIN_NO_OF_DISTRACTOR_OBJECTS,
-    MIN_NO_OF_OBJECTS,
-    MIN_SCALE,
-    MIN_WIDTH,
-    NUMBER_OF_WORKERS,
-    POISSON_BLENDING_DIR,
-    PYBLUR_DIR,
-    SELECTED_LIST_FILE,
-    WIDTH,
-)
+from defaults import CONFIG_FILE, POISSON_BLENDING_DIR, PYBLUR_DIR
 
 sys.path.insert(0, POISSON_BLENDING_DIR)
 sys.path.insert(0, PYBLUR_DIR)
@@ -51,6 +24,8 @@ import pb
 import pyblur
 
 Rectangle = namedtuple("Rectangle", "xmin ymin xmax ymax")
+
+CWD = Path(__file__).resolve().parent
 
 
 def randomAngle(kerneldim):
@@ -95,7 +70,7 @@ def LinearMotionBlur3C(img):
     return blurred_img
 
 
-def overlap(a, b):
+def overlap(a, b, max_allowed_iou):
     """Find if two bounding boxes are overlapping or not. This is determined by maximum allowed
        IOU between bounding boxes. If IOU is less than the max allowed IOU then bounding boxes
        don't overlap
@@ -112,7 +87,7 @@ def overlap(a, b):
     if (
         dx >= 0
         and dy >= 0
-        and float(dx * dy) > MAX_ALLOWED_IOU * (a.xmax - a.xmin) * (a.ymax - a.ymin)
+        and float(dx * dy) > max_allowed_iou * (a.xmax - a.xmin) * (a.ymax - a.ymin)
     ):
         return True
     else:
@@ -133,7 +108,7 @@ def get_list_of_images(root_dir, N=1):
     """
     img_list = list((Path(__file__).resolve().parent / root_dir).glob("*/*.jpg"))
     img_list_f = []
-    for i in range(N):
+    for _ in range(N):
         img_list_f = img_list_f + random.sample(img_list, len(img_list))
     return img_list_f
 
@@ -149,8 +124,7 @@ def get_mask_file(img_file):
     Returns:
         string: Correpsonding mask file path
     """
-    mask_file = img_file.with_suffix(".pbm")
-    return mask_file
+    return img_file.with_suffix(".pbm")
 
 
 def get_labels(imgs):
@@ -166,7 +140,7 @@ def get_labels(imgs):
     return labels
 
 
-def get_annotation_from_mask_file(mask_file, scale=1.0):
+def get_annotation_from_mask_file(mask_file, inverted_mask, scale=1.0):
     """Given a mask file and scale, return the bounding box annotations
 
     Args:
@@ -176,7 +150,7 @@ def get_annotation_from_mask_file(mask_file, scale=1.0):
     """
     if mask_file.exists():
         mask = cv2.imread(str(mask_file))
-        if INVERTED_MASK:
+        if inverted_mask:
             mask = 255 - mask
         rows = np.any(mask, axis=1)
         cols = np.any(mask, axis=0)
@@ -224,42 +198,41 @@ def write_imageset_file(exp_dir, img_files, anno_files):
         img_files(list): List of image files that were generated
         anno_files(list): List of annotation files corresponding to each image file
     """
-    with open(os.path.join(exp_dir, "train.txt"), "w") as f:
+    with open(exp_dir / "train.txt", "w") as f:
         for i in range(len(img_files)):
-            f.write("%s %s\n" % (img_files[i], anno_files[i]))
+            f.write(f"{img_files[i]} {anno_files[i]}\n")
 
 
 def write_labels_file(exp_dir, labels):
     """Writes the labels file which has the name of an object on each line
 
     Args:
-        exp_dir(string): Experiment directory where all the generated images, annotation and imageset
+        exp_dir(Path): Experiment directory where all the generated images, annotation and imageset
                          files will be stored
         labels(list): List of labels. This will be useful while training an object detector
     """
     unique_labels = ["__background__"] + sorted(set(labels))
-    with open(os.path.join(exp_dir, "labels.txt"), "w") as f:
+    with open(exp_dir / "labels.txt", "w") as f:
         for i, label in enumerate(unique_labels):
             f.write("%s %s\n" % (i, label))
 
 
-def keep_selected_labels(img_files, labels):
+def keep_selected_labels(img_files, labels, conf):
     """Filters image files and labels to only retain those that are selected. Useful when one doesn't
        want all objects to be used for synthesis
 
     Args:
         img_files(list): List of images in the root directory
         labels(list): List of labels corresponding to each image
+        conf(dict) : Config options
     Returns:
         new_image_files(list): Selected list of images
-        new_labels(list): Selected list of labels corresponidng to each imahe in above list
+        new_labels(list): Selected list of labels corresponding to each image in above list
     """
-    with open(SELECTED_LIST_FILE) as f:
-        selected_labels = [x.strip() for x in f.readlines()]
     new_img_files = []
     new_labels = []
     for i in range(len(img_files)):
-        if labels[i] in selected_labels:
+        if labels[i] in conf["selected"]:
             new_img_files.append(img_files[i])
             new_labels.append(labels[i])
     return new_img_files, new_labels
@@ -289,22 +262,20 @@ def PIL2array3C(img):
 
 def create_image_anno_wrapper(
     args,
-    w=WIDTH,
-    h=HEIGHT,
+    conf,
     scale_augment=False,
     rotation_augment=False,
     blending_list=["none"],
-    dontocclude=False,
+    no_occlusion=False,
 ):
     """Wrapper used to pass params to workers"""
     return create_image_anno(
         *args,
-        w=w,
-        h=h,
+        conf,
         scale_augment=scale_augment,
         rotation_augment=rotation_augment,
         blending_list=blending_list,
-        dontocclude=dontocclude,
+        no_occlusion=no_occlusion,
     )
 
 
@@ -314,12 +285,11 @@ def create_image_anno(
     img_file,
     anno_file,
     bg_file,
-    w=WIDTH,
-    h=HEIGHT,
+    conf,
     scale_augment=False,
     rotation_augment=False,
     blending_list=["none"],
-    dontocclude=False,
+    no_occlusion=False,
 ):
     """Add data augmentation, synthesizes images and generates annotations according to given parameters
 
@@ -334,19 +304,21 @@ def create_image_anno(
         scale_augment(bool): Add scale data augmentation
         rotation_augment(bool): Add rotation data augmentation
         blending_list(list): List of blending modes to synthesize for each image
-        dontocclude(bool): Generate images with occlusion
+        no_occlusion(bool): Generate images with occlusion
     """
-    if "none" not in img_file:
+    if "none" not in img_file.name:
         return
 
     print(f"Working on {img_file}")
-    if os.path.exists(anno_file):
+    if anno_file.exists():
         return anno_file
 
     all_objects = objects + distractor_objects
     assert len(all_objects) > 0
+
+    w = conf["width"]
+    h = conf["height"]
     while True:
-        # top = Element("annotation")
         boxes = []
         background = Image.open(bg_file)
         background = background.resize((w, h), Image.ANTIALIAS)
@@ -354,40 +326,41 @@ def create_image_anno(
         for i in range(len(blending_list)):
             backgrounds.append(background.copy())
 
-        if dontocclude:
+        if no_occlusion:
             already_syn = []
         for idx, obj in enumerate(all_objects):
             foreground = Image.open(obj[0])
+            mask_file = get_mask_file(obj[0])
             xmin, xmax, ymin, ymax = get_annotation_from_mask_file(
-                get_mask_file(obj[0])
+                mask_file, conf["inverted_mask"]
             )
             if (
                 xmin == -1
                 or ymin == -1
-                or xmax - xmin < MIN_WIDTH
-                or ymax - ymin < MIN_HEIGHT
+                or xmax - xmin < conf["min_width"]
+                or ymax - ymin < conf["min_height"]
             ):
                 continue
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
             orig_w, orig_h = foreground.size
-            mask_file = get_mask_file(obj[0])
             mask = Image.open(mask_file)
             mask = mask.crop((xmin, ymin, xmax, ymax))
-            if INVERTED_MASK:
+            if conf["inverted_mask"]:
                 mask = Image.fromarray(255 - PIL2array1C(mask)).convert("1")
             o_w, o_h = orig_w, orig_h
             if scale_augment:
                 while True:
-                    scale = random.uniform(MIN_SCALE, MAX_SCALE)
+                    scale = random.uniform(conf["min_scale"], conf["max_scale"])
                     o_w, o_h = int(scale * orig_w), int(scale * orig_h)
                     if w - o_w > 0 and h - o_h > 0 and o_w > 0 and o_h > 0:
                         break
                 foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
                 mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
             if rotation_augment:
-                max_degrees = MAX_DEGREES
                 while True:
-                    rot_degrees = random.randint(-max_degrees, max_degrees)
+                    rot_degrees = random.randint(
+                        -conf["max_degrees"], conf["max_degrees"]
+                    )
                     foreground_tmp = foreground.rotate(rot_degrees, expand=True)
                     mask_tmp = mask.rotate(rot_degrees, expand=True)
                     o_w, o_h = foreground_tmp.size
@@ -400,28 +373,28 @@ def create_image_anno(
             while True:
                 attempt += 1
                 x = random.randint(
-                    int(-MAX_TRUNCATION_FRACTION * o_w),
-                    int(w - o_w + MAX_TRUNCATION_FRACTION * o_w),
+                    int(-conf["max_truncation_frac"] * o_w),
+                    int(w - o_w + conf["max_truncation_frac"] * o_w),
                 )
                 y = random.randint(
-                    int(-MAX_TRUNCATION_FRACTION * o_h),
-                    int(h - o_h + MAX_TRUNCATION_FRACTION * o_h),
+                    int(-conf["max_truncation_frac"] * o_h),
+                    int(h - o_h + conf["max_truncation_frac"] * o_h),
                 )
-                if dontocclude:
+                if no_occlusion:
                     found = True
                     for prev in already_syn:
                         ra = Rectangle(prev[0], prev[2], prev[1], prev[3])
                         rb = Rectangle(x + xmin, y + ymin, x + xmax, y + ymax)
-                        if overlap(ra, rb):
+                        if overlap(ra, rb, conf["max_allowed_iou"]):
                             found = False
                             break
                     if found:
                         break
                 else:
                     break
-                if attempt == MAX_ATTEMPTS_TO_SYNTHESIZE:
+                if attempt == conf["max_attempts"]:
                     break
-            if dontocclude:
+            if no_occlusion:
                 already_syn.append([x + xmin, x + xmax, y + ymin, y + ymax])
             for i in range(len(blending_list)):
                 if blending_list[i] == "none" or blending_list[i] == "motion":
@@ -467,14 +440,14 @@ def create_image_anno(
                 f"{(x_max - x_min) / w} "
                 f"{(y_max - y_min) / h}"
             )
-        if attempt == MAX_ATTEMPTS_TO_SYNTHESIZE:
+        if attempt == conf["max_attempts"]:
             continue
         else:
             break
     for i in range(len(blending_list)):
         if blending_list[i] == "motion":
             backgrounds[i] = LinearMotionBlur3C(PIL2array3C(backgrounds[i]))
-        backgrounds[i].save(img_file.replace("none", blending_list[i]))
+        backgrounds[i].save(str(img_file).replace("none", blending_list[i]))
 
     with open(anno_file, "w") as f:
         f.write("\n".join(boxes))
@@ -485,9 +458,10 @@ def gen_syn_data(
     labels,
     img_dir,
     anno_dir,
+    conf,
     scale_augment,
     rotation_augment,
-    dontocclude,
+    no_occlusion,
     add_distractors,
 ):
     """Creates list of objects and distrctor objects to be pasted on what images.
@@ -500,26 +474,24 @@ def gen_syn_data(
         anno_dir(str): Directory where corresponding annotations will be stored
         scale_augment(bool): Add scale data augmentation
         rotation_augment(bool): Add rotation data augmentation
-        dontocclude(bool): Generate images with occlusion
+        no_occlusion(bool): Generate images with occlusion
         add_distractors(bool): Add distractor objects whose annotations are not required
     """
-    w = WIDTH
-    h = HEIGHT
-    background_dir = BACKGROUND_DIR
-    background_files = glob.glob(os.path.join(background_dir, BACKGROUND_GLOB_STRING))
+    background_files = list(
+        (CWD / conf["background_dir"]).glob(conf["background_glob_string"])
+    )
 
     print(f"Number of background images : {len(background_files)}")
     img_labels = list(zip(img_files, labels))
     random.shuffle(img_labels)
 
     if add_distractors:
-        with open(DISTRACTOR_LIST_FILE) as f:
-            distractor_labels = [x.strip() for x in f.readlines()]
-
         distractor_list = []
-        for distractor_label in distractor_labels:
-            distractor_list += glob.glob(
-                os.path.join(DISTRACTOR_DIR, distractor_label, DISTRACTOR_GLOB_STRING)
+        for distractor_label in conf["distractor"]:
+            distractor_list += list(
+                (CWD / conf["distractor_dir"] / distractor_label).glob(
+                    conf["distractor_glob_string"]
+                )
             )
 
         distractor_files = list(zip(distractor_list, len(distractor_list) * [None]))
@@ -535,27 +507,28 @@ def gen_syn_data(
     while len(img_labels) > 0:
         # Get list of objects
         objects = []
-        n = min(random.randint(MIN_NO_OF_OBJECTS, MAX_NO_OF_OBJECTS), len(img_labels))
-        for i in range(n):
+        n = min(
+            random.randint(conf["min_object_num"], conf["max_object_num"]),
+            len(img_labels),
+        )
+        for _ in range(n):
             objects.append(img_labels.pop())
         # Get list of distractor objects
         distractor_objects = []
         if add_distractors:
             n = min(
-                random.randint(
-                    MIN_NO_OF_DISTRACTOR_OBJECTS, MAX_NO_OF_DISTRACTOR_OBJECTS
-                ),
+                random.randint(conf["min_distractor_num"], conf["max_distractor_num"]),
                 len(distractor_files),
             )
-            for i in range(n):
+            for _ in range(n):
                 distractor_objects.append(random.choice(distractor_files))
             print(f"Chosen distractor objects: {distractor_objects}")
 
         idx += 1
         bg_file = random.choice(background_files)
-        for blur in BLENDING_LIST:
-            img_file = os.path.join(img_dir, "%i_%s.jpg" % (idx, blur))
-            anno_file = os.path.join(anno_dir, "%i.txt" % idx)
+        for blur in conf["blending"]:
+            img_file = img_dir / f"{idx}_{blur}.jpg"
+            anno_file = anno_dir / f"{idx}.txt"
             params = (objects, distractor_objects, img_file, anno_file, bg_file)
             params_list.append(params)
             img_files.append(img_file)
@@ -563,14 +536,13 @@ def gen_syn_data(
 
     partial_func = partial(
         create_image_anno_wrapper,
-        w=w,
-        h=h,
+        conf=conf,
         scale_augment=scale_augment,
         rotation_augment=rotation_augment,
-        blending_list=BLENDING_LIST,
-        dontocclude=dontocclude,
+        blending_list=conf["blending"],
+        no_occlusion=no_occlusion,
     )
-    p = Pool(NUMBER_OF_WORKERS, init_worker)
+    p = Pool(conf["num_workers"], init_worker)
     try:
         p.map(partial_func, params_list)
     except KeyboardInterrupt:
@@ -594,32 +566,33 @@ def generate_synthetic_dataset(args):
     img_files = get_list_of_images(args.root, args.num)
     labels = get_labels(img_files)
 
+    with open(CONFIG_FILE) as f:
+        conf = yaml.safe_load(f)
     if args.selected:
-        img_files, labels = keep_selected_labels(img_files, labels)
+        img_files, labels = keep_selected_labels(img_files, labels, conf)
 
-    if not os.path.exists(args.exp):
-        os.makedirs(args.exp)
+    exp_dir = CWD / args.exp
+    exp_dir.mkdir(parents=True, exist_ok=True)
 
-    write_labels_file(args.exp, labels)
+    write_labels_file(exp_dir, labels)
 
-    anno_dir = os.path.join(args.exp, "annotations")
-    img_dir = os.path.join(args.exp, "images")
-    if not os.path.exists(os.path.join(anno_dir)):
-        os.makedirs(anno_dir)
-    if not os.path.exists(os.path.join(img_dir)):
-        os.makedirs(img_dir)
+    anno_dir = exp_dir / "annotations"
+    img_dir = exp_dir / "images"
+    anno_dir.mkdir(parents=True, exist_ok=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
 
     syn_img_files, anno_files = gen_syn_data(
         img_files,
         labels,
         img_dir,
         anno_dir,
+        conf,
         args.scale,
         args.rotation,
-        args.dontocclude,
+        args.no_occlusion,
         args.add_distractors,
     )
-    write_imageset_file(args.exp, syn_img_files, anno_files)
+    write_imageset_file(exp_dir, syn_img_files, anno_files)
 
 
 if __name__ == "__main__":
@@ -654,7 +627,7 @@ if __name__ == "__main__":
         type=int,
     )
     parser.add_argument(
-        "--dontocclude",
+        "--no_occlusion",
         help="Add objects without occlusion. Default is to produce occlusions",
         action="store_true",
     )
