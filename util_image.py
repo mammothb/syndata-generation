@@ -1,4 +1,5 @@
 import math
+import random
 import sys
 
 import cv2
@@ -6,9 +7,60 @@ import numpy as np
 from PIL import Image
 
 from defaults import PYBLUR_DIR
+from util_io import get_mask_file
 
 sys.path.insert(0, PYBLUR_DIR)
 import pyblur
+
+
+def add_localized_distractor(
+    distractor, fg_size, fg_crop_size, conf, opt, object_foreground
+):
+    """
+    Args:
+        distractor(list): List of distractor objects with their respective
+            coordinates
+        fg_size(tuple): Object foreground size (width, height)
+        fg_crop_size(tuple): Cropped object foreground size (width, height)
+        conf(dict): Config options
+        opt(Namespace): Contains options to:
+                1. Add scale data augmentation
+                2. Add rotation data augmentation
+                3. Generate images with occlusion
+                4. Add distractor objects whose annotations are not required
+        object_foreground(PIL.Image): Object foreground
+    """
+    path = distractor[0][0]
+    foreground = Image.open(path)
+    mask_file = get_mask_file(path)
+    xmin, xmax, ymin, ymax = get_annotation_from_mask_file(
+        mask_file, conf["inverted_mask"]
+    )
+    foreground = foreground.crop((xmin, ymin, xmax, ymax))
+    orig_w, orig_h = foreground.size
+    mask = Image.open(mask_file)
+    mask = mask.crop((xmin, ymin, xmax, ymax))
+    if conf["inverted_mask"]:
+        mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
+    if orig_w > orig_h:
+        o_w = int(fg_crop_size[0] / 3)
+        o_h = int(orig_h * o_w / orig_w)
+    else:
+        o_h = int(fg_crop_size[1] / 3)
+        o_w = int(orig_w * o_h / orig_h)
+    foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
+    mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
+    if opt.rotate:
+        rot_degrees = random.randint(
+            -conf["max_degrees"], conf["max_degrees"]
+        )
+        foreground = foreground.rotate(rot_degrees, expand=True)
+        mask = mask.rotate(rot_degrees, expand=True)
+        o_w, o_h = foreground.size
+    x = int(fg_size[0] * distractor[1][1] - o_w / 2)
+    y = int(fg_size[1] * distractor[1][0] - o_h / 2)
+    object_foreground.paste(foreground, (x, y), mask)
+    return object_foreground
 
 
 def get_annotation_from_mask(mask):

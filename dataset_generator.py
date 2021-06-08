@@ -19,6 +19,7 @@ from PIL import Image
 from defaults import CONFIG_FILE, POISSON_BLENDING_DIR, PYBLUR_DIR
 from util_bbox import overlap
 from util_image import (
+    add_localized_distractor,
     get_annotation_from_mask,
     get_annotation_from_mask_file,
     linear_motion_blur_3c,
@@ -52,57 +53,61 @@ def get_labels(imgs):
     return labels
 
 
-def keep_selected_labels(img_files, labels, conf):
+def get_occlusion_coords(imgs):
+    occlusion_coords = []
+    curr_label = None
+    for img_file in imgs:
+        if img_file.parent != curr_label:
+            curr_label = img_file.parent
+            try:
+                with open(img_file.parent / "occlusion_coords.yaml") as infile:
+                    coords_data = yaml.safe_load(infile)
+            except FileNotFoundError:
+                coords_data = {}
+        occlusion_coords.append(coords_data.get(img_file.name, []))
+    return occlusion_coords
+
+
+def keep_selected_labels(img_files, labels, occlusion_coords, conf):
     """Filters image files and labels to only retain those that are selected. Useful when one doesn't
        want all objects to be used for synthesis
 
     Args:
         img_files(list): List of images in the root directory
         labels(list): List of labels corresponding to each image
-        conf(dict) : Config options
+        conf(dict): Config options
     Returns:
         new_image_files(list): Selected list of images
         new_labels(list): Selected list of labels corresponding to each image in above list
     """
     new_img_files = []
     new_labels = []
+    new_occlusion_coords = []
     for i in range(len(img_files)):
         if labels[i] in conf["selected"]:
             new_img_files.append(img_files[i])
             new_labels.append(labels[i])
-    return new_img_files, new_labels
+            new_occlusion_coords.append(occlusion_coords[i])
+    return new_img_files, new_labels, new_occlusion_coords
 
 
 def create_image_anno_wrapper(
-    args,
-    conf,
-    scale_augment=False,
-    rotate_augment=False,
-    blending_list=["none"],
-    no_occlusion=False,
+    args, conf, opt, blending_list=["none"],
 ):
     """Wrapper used to pass params to workers"""
-    return create_image_anno(
-        *args,
-        conf,
-        scale_augment=scale_augment,
-        rotate_augment=rotate_augment,
-        blending_list=blending_list,
-        no_occlusion=no_occlusion,
-    )
+    return create_image_anno(*args, conf, opt, blending_list=blending_list,)
 
 
 def create_image_anno(
     objects,
     distractor_objects,
+    localized_distractor_objects,
     img_file,
     anno_file,
     bg_file,
     conf,
-    scale_augment=False,
-    rotate_augment=False,
+    opt,
     blending_list=["none"],
-    no_occlusion=False,
 ):
     """Add data augmentation, synthesizes images and generates annotations according to given parameters
 
@@ -112,12 +117,13 @@ def create_image_anno(
         img_file(str): Image file name
         anno_file(str): Annotation file name
         bg_file(str): Background image path
-        w(int): Width of synthesized image
-        h(int): Height of synthesized image
-        scale_augment(bool): Add scale data augmentation
-        rotate_augment(bool): Add rotation data augmentation
+        conf(dict): Config options
+        opt(Namespace): Contains options to:
+                1. Add scale data augmentation
+                2. Add rotation data augmentation
+                3. Generate images with occlusion
+                4. Add distractor objects whose annotations are not required
         blending_list(list): List of blending modes to synthesize for each image
-        no_occlusion(bool): Generate images with occlusion
     """
     if "none" not in img_file.name:
         return
@@ -144,7 +150,7 @@ def create_image_anno(
         # 2. Position
         # 3. Size/scale
         # 4. Pre-occluded images
-        if no_occlusion:
+        if opt.no_occlusion:
             already_syn = []
         for idx, obj in enumerate(all_objects):
             foreground = Image.open(obj[0])
@@ -159,14 +165,22 @@ def create_image_anno(
                 or ymax - ymin < conf["min_height"]
             ):
                 continue
+            foreground_crop = foreground.crop((xmin, ymin, xmax, ymax))
+            orig_w, orig_h = foreground_crop.size
+            if idx < len(objects) and localized_distractor_objects[idx]:
+                print(obj[0])
+                print(localized_distractor_objects[idx])
+                for l_obj in localized_distractor_objects[idx]:
+                    foreground = add_localized_distractor(
+                        l_obj, foreground.size, (orig_w, orig_h), conf, opt, foreground
+                    )
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
-            orig_w, orig_h = foreground.size
             mask = Image.open(mask_file)
             mask = mask.crop((xmin, ymin, xmax, ymax))
             if conf["inverted_mask"]:
                 mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
             o_w, o_h = orig_w, orig_h
-            if scale_augment:
+            if opt.scale:
                 while True:
                     scale = random.uniform(conf["min_scale"], conf["max_scale"])
                     o_w, o_h = int(scale * orig_w), int(scale * orig_h)
@@ -174,7 +188,7 @@ def create_image_anno(
                         break
                 foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
                 mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
-            if rotate_augment:
+            if opt.rotate:
                 while True:
                     rot_degrees = random.randint(
                         -conf["max_degrees"], conf["max_degrees"]
@@ -198,7 +212,7 @@ def create_image_anno(
                     int(-conf["max_truncation_frac"] * o_h),
                     int(h - o_h + conf["max_truncation_frac"] * o_h),
                 )
-                if no_occlusion:
+                if opt.no_occlusion:
                     found = True
                     for prev in already_syn:
                         ra = Rectangle(prev[0], prev[2], prev[1], prev[3])
@@ -212,7 +226,7 @@ def create_image_anno(
                     break
                 if attempt == conf["max_attempts"]:
                     break
-            if no_occlusion:
+            if opt.no_occlusion:
                 already_syn.append([x + xmin, x + xmax, y + ymin, y + ymax])
             for i in range(len(blending_list)):
                 if blending_list[i] == "none" or blending_list[i] == "motion":
@@ -274,15 +288,7 @@ def create_image_anno(
 
 
 def gen_syn_data(
-    img_files,
-    labels,
-    img_dir,
-    anno_dir,
-    conf,
-    scale_augment,
-    rotate_augment,
-    no_occlusion,
-    add_distractors,
+    img_files, labels, occlusion_coords, img_dir, anno_dir, conf, opt,
 ):
     """Creates list of objects and distrctor objects to be pasted on what images.
        Spawns worker processes and generates images according to given params
@@ -292,20 +298,22 @@ def gen_syn_data(
         labels(list): List of labels for each image
         img_dir(str): Directory where synthesized images will be stored
         anno_dir(str): Directory where corresponding annotations will be stored
-        scale_augment(bool): Add scale data augmentation
-        rotate_augment(bool): Add rotation data augmentation
-        no_occlusion(bool): Generate images with occlusion
-        add_distractors(bool): Add distractor objects whose annotations are not required
+        conf(dict): Config options
+        opt(Namespace): Contains options to:
+                        1. Add scale data augmentation
+                        2. Add rotation data augmentation
+                        3. Generate images with occlusion
+                        4. Add distractor objects whose annotations are not required
     """
     background_files = list(
         (CWD / conf["background_dir"]).glob(conf["background_glob_string"])
     )
 
-    print(f"Number of background images : {len(background_files)}")
-    img_labels = list(zip(img_files, labels))
+    print(f"Number of background images: {len(background_files)}")
+    img_labels = list(zip(img_files, labels, occlusion_coords))
     random.shuffle(img_labels)
 
-    if add_distractors:
+    if opt.add_distractors:
         distractor_list = []
         for distractor_label in conf["distractor"]:
             distractor_list += list(
@@ -335,7 +343,7 @@ def gen_syn_data(
             objects.append(img_labels.pop())
         # Get list of distractor objects
         distractor_objects = []
-        if add_distractors:
+        if opt.add_distractors:
             n = min(
                 random.randint(conf["min_distractor_num"], conf["max_distractor_num"]),
                 len(distractor_files),
@@ -344,12 +352,31 @@ def gen_syn_data(
                 distractor_objects.append(random.choice(distractor_files))
             print(f"Chosen distractor objects: {distractor_objects}")
 
+        localized_distractor_objects = []
+        if opt.localized_distractor:
+            for obj in objects:
+                if obj[2]:
+                    localized_distractor_objects.append([])
+                    for coord in obj[2]:
+                        localized_distractor_objects[-1].append(
+                            [random.choice(distractor_files), coord]
+                        )
+                else:
+                    localized_distractor_objects.append(None)
+
         idx += 1
         bg_file = random.choice(background_files)
         for blur in conf["blending"]:
             img_file = img_dir / f"{idx}_{blur}.jpg"
             anno_file = anno_dir / f"{idx}.txt"
-            params = (objects, distractor_objects, img_file, anno_file, bg_file)
+            params = (
+                objects,
+                distractor_objects,
+                localized_distractor_objects,
+                img_file,
+                anno_file,
+                bg_file,
+            )
             params_list.append(params)
             img_files.append(img_file)
             anno_files.append(anno_file)
@@ -357,10 +384,8 @@ def gen_syn_data(
     # partial_func = partial(
     #     create_image_anno_wrapper,
     #     conf=conf,
-    #     scale_augment=scale_augment,
-    #     rotate_augment=rotate_augment,
+    #     opt=opt,
     #     blending_list=conf["blending"],
-    #     no_occlusion=no_occlusion,
     # )
     # p = Pool(conf["num_workers"], init_worker)
     # try:
@@ -373,12 +398,7 @@ def gen_syn_data(
     # p.join()
     for params in params_list:
         create_image_anno_wrapper(
-            params,
-            conf=conf,
-            scale_augment=scale_augment,
-            rotate_augment=rotate_augment,
-            blending_list=conf["blending"],
-            no_occlusion=no_occlusion,
+            params, conf=conf, opt=opt, blending_list=conf["blending"],
         )
 
     return img_files, anno_files
@@ -395,11 +415,14 @@ def generate_synthetic_dataset(args):
     """Generate synthetic dataset according to given args"""
     img_files = get_list_of_images(CWD / args.root, args.num)
     labels = get_labels(img_files)
+    occlusion_coords = get_occlusion_coords(img_files)
 
     with open(CONFIG_FILE) as f:
         conf = yaml.safe_load(f)
     if args.selected:
-        img_files, labels = keep_selected_labels(img_files, labels, conf)
+        img_files, labels, occlusion_coords = keep_selected_labels(
+            img_files, labels, occlusion_coords, conf
+        )
 
     exp_dir = CWD / args.exp
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -412,15 +435,7 @@ def generate_synthetic_dataset(args):
     img_dir.mkdir(parents=True, exist_ok=True)
 
     syn_img_files, anno_files = gen_syn_data(
-        img_files,
-        labels,
-        img_dir,
-        anno_dir,
-        conf,
-        args.scale,
-        args.rotation,
-        args.no_occlusion,
-        args.add_distractors,
+        img_files, labels, occlusion_coords, img_dir, anno_dir, conf, args,
     )
     write_imageset_file(exp_dir, syn_img_files, anno_files)
 
@@ -449,7 +464,7 @@ if __name__ == "__main__":
         action="store_false",
     )
     parser.add_argument(
-        "--rotation",
+        "--rotate",
         help="Add rotation augmentation. Default is to add rotation augmentation.",
         action="store_false",
     )
@@ -469,5 +484,13 @@ if __name__ == "__main__":
         help="Add distractors objects. Default is to not use distractors",
         action="store_true",
     )
-    args = parser.parse_args()
-    generate_synthetic_dataset(args)
+    parser.add_argument(
+        "--localized_distractor",
+        help=(
+            "Add occluding distractors to specified spots. "
+            "Default is to not localize distractors"
+        ),
+        action="store_true",
+    )
+    opt = parser.parse_args()
+    generate_synthetic_dataset(opt)
