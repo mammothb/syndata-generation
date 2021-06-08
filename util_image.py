@@ -14,7 +14,7 @@ import pyblur
 
 
 def add_localized_distractor(
-    distractor, fg_size, fg_crop_size, conf, opt, object_foreground
+    distractor, fg_size, fg_crop_size, conf, opt, object_foreground, object_mask
 ):
     """
     Args:
@@ -29,6 +29,7 @@ def add_localized_distractor(
                 3. Generate images with occlusion
                 4. Add distractor objects whose annotations are not required
         object_foreground(PIL.Image): Object foreground
+        object_mask(PIL.Image): Object mask
     """
     path = distractor[0][0]
     foreground = Image.open(path)
@@ -60,7 +61,8 @@ def add_localized_distractor(
     x = int(fg_size[0] * distractor[1][1] - o_w / 2)
     y = int(fg_size[1] * distractor[1][0] - o_h / 2)
     object_foreground.paste(foreground, (x, y), mask)
-    return object_foreground
+    object_mask.paste(mask, (x, y), mask)
+    return object_foreground, object_mask
 
 
 def get_annotation_from_mask(mask):

@@ -158,6 +158,9 @@ def create_image_anno(
             xmin, xmax, ymin, ymax = get_annotation_from_mask_file(
                 mask_file, conf["inverted_mask"]
             )
+            mask = Image.open(mask_file)
+            if conf["inverted_mask"]:
+                mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
             if (
                 xmin == -1
                 or ymin == -1
@@ -168,17 +171,12 @@ def create_image_anno(
             foreground_crop = foreground.crop((xmin, ymin, xmax, ymax))
             orig_w, orig_h = foreground_crop.size
             if idx < len(objects) and localized_distractor_objects[idx]:
-                print(obj[0])
-                print(localized_distractor_objects[idx])
                 for l_obj in localized_distractor_objects[idx]:
-                    foreground = add_localized_distractor(
-                        l_obj, foreground.size, (orig_w, orig_h), conf, opt, foreground
+                    foreground, mask = add_localized_distractor(
+                        l_obj, foreground.size, (orig_w, orig_h), conf, opt, foreground, mask
                     )
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
-            mask = Image.open(mask_file)
             mask = mask.crop((xmin, ymin, xmax, ymax))
-            if conf["inverted_mask"]:
-                mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
             o_w, o_h = orig_w, orig_h
             if opt.scale:
                 while True:
@@ -357,10 +355,12 @@ def gen_syn_data(
             for obj in objects:
                 if obj[2]:
                     localized_distractor_objects.append([])
+                    # For each location coord, add a distractor 50% of the time
                     for coord in obj[2]:
-                        localized_distractor_objects[-1].append(
-                            [random.choice(distractor_files), coord]
-                        )
+                        if random.random() < 0.5:
+                            localized_distractor_objects[-1].append(
+                                [random.choice(distractor_files), coord]
+                            )
                 else:
                     localized_distractor_objects.append(None)
 
