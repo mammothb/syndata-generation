@@ -1,16 +1,12 @@
 import math
 import random
-import sys
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from defaults import PYBLUR_DIR
+from pyblur import pyblur
 from util_io import get_mask_file
-
-sys.path.insert(0, PYBLUR_DIR)
-import pyblur
 
 
 def add_localized_distractor(
@@ -52,9 +48,7 @@ def add_localized_distractor(
     foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
     mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
     if opt.rotate:
-        rot_degrees = random.randint(
-            -conf["max_degrees"], conf["max_degrees"]
-        )
+        rot_degrees = random.randint(-conf["max_degrees"], conf["max_degrees"])
         foreground = foreground.rotate(rot_degrees, expand=True)
         mask = mask.rotate(rot_degrees, expand=True)
         o_w, o_h = foreground.size

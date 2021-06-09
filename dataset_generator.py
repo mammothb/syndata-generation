@@ -1,10 +1,6 @@
 import argparse
-import glob
-import math
-import os
 import random
 import signal
-import sys
 from collections import namedtuple
 from functools import partial
 from multiprocessing import Pool
@@ -16,7 +12,8 @@ import scipy
 import yaml
 from PIL import Image
 
-from defaults import CONFIG_FILE, POISSON_BLENDING_DIR, PYBLUR_DIR
+from defaults import CONFIG_FILE
+from pb import pb
 from util_bbox import overlap
 from util_image import (
     add_localized_distractor,
@@ -33,8 +30,6 @@ from util_io import (
     write_labels_file,
 )
 
-sys.path.insert(0, POISSON_BLENDING_DIR)
-import pb
 
 Rectangle = namedtuple("Rectangle", "xmin ymin xmax ymax")
 CWD = Path(__file__).resolve().parent
@@ -173,7 +168,13 @@ def create_image_anno(
             if idx < len(objects) and localized_distractor_objects[idx]:
                 for l_obj in localized_distractor_objects[idx]:
                     foreground, mask = add_localized_distractor(
-                        l_obj, foreground.size, (orig_w, orig_h), conf, opt, foreground, mask
+                        l_obj,
+                        foreground.size,
+                        (orig_w, orig_h),
+                        conf,
+                        opt,
+                        foreground,
+                        mask,
                     )
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
             mask = mask.crop((xmin, ymin, xmax, ymax))

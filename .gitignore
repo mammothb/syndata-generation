@@ -93,5 +93,6 @@ output_dir/**/*.xml
 *.jpg
 *.pbm
 *.png
+*.svg
 *.txt
 *.xml

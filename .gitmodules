@@ -1,0 +1,6 @@
+[submodule "pyblur"]
+	path = pyblur
+	url = https://github.com/mammothb/pyblur
+[submodule "pb"]
+	path = pb
+	url = https://github.com/mammothb/pb
