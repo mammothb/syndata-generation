@@ -38,12 +38,12 @@ def add_localized_distractor(
     mask = Image.open(mask_file)
     mask = mask.crop((xmin, ymin, xmax, ymax))
     if conf["inverted_mask"]:
-        mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
+        mask = invert_mask(mask)
     if orig_w > orig_h:
-        o_w = int(fg_crop_size[0] / 3)
+        o_w = int(fg_crop_size[0] * 0.5)
         o_h = int(orig_h * o_w / orig_w)
     else:
-        o_h = int(fg_crop_size[1] / 3)
+        o_h = int(fg_crop_size[1] * 0.5)
         o_w = int(orig_w * o_h / orig_h)
     foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
     mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
@@ -106,6 +106,9 @@ def get_annotation_from_mask_file(mask_file, inverted_mask, scale=1.0):
         print(f"{mask_file} not found. Using empty mask instead.")
         return -1, -1, -1, -1
 
+
+def invert_mask(mask):
+    return Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
 
 def linear_motion_blur_3c(img):
     """Performs motion blur on an image with 3 channels. Used to simulate

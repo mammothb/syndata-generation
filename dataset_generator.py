@@ -19,13 +19,17 @@ from util_image import (
     add_localized_distractor,
     get_annotation_from_mask,
     get_annotation_from_mask_file,
+    invert_mask,
     linear_motion_blur_3c,
     pil_to_array_1c,
     pil_to_array_3c,
 )
 from util_io import (
+    get_labels,
+    get_occlusion_coords,
     get_list_of_images,
     get_mask_file,
+    print_paths,
     write_imageset_file,
     write_labels_file,
 )
@@ -33,34 +37,8 @@ from util_io import (
 
 Rectangle = namedtuple("Rectangle", "xmin ymin xmax ymax")
 CWD = Path(__file__).resolve().parent
-
-
-def get_labels(imgs):
-    """Get list of labels/object names. Assumes the images in the root directory follow root_dir/<object>/<image>
-       structure. Directory name would be object name.
-
-    Args:
-        imgs(list): List of images being used for synthesis
-    Returns:
-        list: List of labels/object names corresponding to each image
-    """
-    labels = [img_file.parent.stem for img_file in imgs]
-    return labels
-
-
-def get_occlusion_coords(imgs):
-    occlusion_coords = []
-    curr_label = None
-    for img_file in imgs:
-        if img_file.parent != curr_label:
-            curr_label = img_file.parent
-            try:
-                with open(img_file.parent / "occlusion_coords.yaml") as infile:
-                    coords_data = yaml.safe_load(infile)
-            except FileNotFoundError:
-                coords_data = {}
-        occlusion_coords.append(coords_data.get(img_file.name, []))
-    return occlusion_coords
+SEED = 123
+random.seed(SEED)
 
 
 def keep_selected_labels(img_files, labels, occlusion_coords, conf):
@@ -78,9 +56,9 @@ def keep_selected_labels(img_files, labels, occlusion_coords, conf):
     new_img_files = []
     new_labels = []
     new_occlusion_coords = []
-    for i in range(len(img_files)):
+    for i, img_file in enumerate(img_files):
         if labels[i] in conf["selected"]:
-            new_img_files.append(img_files[i])
+            new_img_files.append(img_file)
             new_labels.append(labels[i])
             new_occlusion_coords.append(occlusion_coords[i])
     return new_img_files, new_labels, new_occlusion_coords
@@ -93,10 +71,29 @@ def create_image_anno_wrapper(
     return create_image_anno(*args, conf, opt, blending_list=blending_list,)
 
 
+def constrained_randint(frac, fg_dim, bg_dim):
+    """Return a random int constrained by the allowed trunction fraction and
+    bg/fg sizes
+
+    Args:
+        frac(float): Max allowed truncation fraction
+        fg_dim(int): Foreground dimension (height or width)
+        bg_dim(int): Background dimension (height or width)
+    """
+    return random.randint(int(-frac * fg_dim), int(bg_dim - fg_dim + frac * fg_dim))
+
+
+def constrained_rand_num(obj_type, max_num, conf):
+    return min(
+        random.randint(conf[f"min_{obj_type}_num"], conf[f"max_{obj_type}_num"]),
+        max_num,
+    )
+
+
 def create_image_anno(
     objects,
     distractor_objects,
-    localized_distractor_objects,
+    localized_distractors,
     img_file,
     anno_file,
     bg_file,
@@ -140,12 +137,7 @@ def create_image_anno(
         for _ in blending_list:
             backgrounds.append(background.copy())
 
-        # Potential forced occlusion
-        # 1. Chance
-        # 2. Position
-        # 3. Size/scale
-        # 4. Pre-occluded images
-        if opt.no_occlusion:
+        if not opt.occlude:
             already_syn = []
         for idx, obj in enumerate(all_objects):
             foreground = Image.open(obj[0])
@@ -155,7 +147,7 @@ def create_image_anno(
             )
             mask = Image.open(mask_file)
             if conf["inverted_mask"]:
-                mask = Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
+                mask = invert_mask(mask)
             if (
                 xmin == -1
                 or ymin == -1
@@ -165,10 +157,10 @@ def create_image_anno(
                 continue
             foreground_crop = foreground.crop((xmin, ymin, xmax, ymax))
             orig_w, orig_h = foreground_crop.size
-            if idx < len(objects) and localized_distractor_objects[idx]:
-                for l_obj in localized_distractor_objects[idx]:
+            if idx < len(objects) and localized_distractors[idx]:
+                for distractor in localized_distractors[idx]:
                     foreground, mask = add_localized_distractor(
-                        l_obj,
+                        distractor,
                         foreground.size,
                         (orig_w, orig_h),
                         conf,
@@ -178,6 +170,14 @@ def create_image_anno(
                     )
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
             mask = mask.crop((xmin, ymin, xmax, ymax))
+            rel_scale = 1
+            if orig_w > orig_h and orig_w > w * 0.75:
+                rel_scale = w * 0.75 / orig_w
+            elif orig_h > orig_w and orig_h > h * 0.75:
+                rel_scale = h * 0.75 / orig_h
+            orig_w, orig_h = int(orig_w * rel_scale), int(orig_h * rel_scale)
+            foreground = foreground.resize((orig_w, orig_h), Image.ANTIALIAS)
+            mask = mask.resize((orig_w, orig_h), Image.ANTIALIAS)
             o_w, o_h = orig_w, orig_h
             if opt.scale:
                 while True:
@@ -203,40 +203,37 @@ def create_image_anno(
             attempt = 0
             while True:
                 attempt += 1
-                x = random.randint(
-                    int(-conf["max_truncation_frac"] * o_w),
-                    int(w - o_w + conf["max_truncation_frac"] * o_w),
-                )
-                y = random.randint(
-                    int(-conf["max_truncation_frac"] * o_h),
-                    int(h - o_h + conf["max_truncation_frac"] * o_h),
-                )
-                if opt.no_occlusion:
-                    found = True
-                    for prev in already_syn:
-                        ra = Rectangle(prev[0], prev[2], prev[1], prev[3])
-                        rb = Rectangle(x + xmin, y + ymin, x + xmax, y + ymax)
-                        if overlap(ra, rb, conf["max_allowed_iou"]):
-                            found = False
-                            break
-                    if found:
+                x = constrained_randint(conf["max_truncation_frac"], o_w, w)
+                y = constrained_randint(conf["max_truncation_frac"], o_h, h)
+                if opt.occlude:
+                    break
+                found = True
+                for prev in already_syn:
+                    ra = Rectangle(prev[0], prev[2], prev[1], prev[3])
+                    rb = Rectangle(x + xmin, y + ymin, x + xmax, y + ymax)
+                    if overlap(ra, rb, conf["max_allowed_iou"]):
+                        found = False
                         break
-                else:
+                if found:
                     break
                 if attempt == conf["max_attempts"]:
                     break
-            if opt.no_occlusion:
+            if not opt.occlude:
                 already_syn.append([x + xmin, x + xmax, y + ymin, y + ymax])
-            for i in range(len(blending_list)):
-                if blending_list[i] == "none" or blending_list[i] == "motion":
-                    backgrounds[i].paste(foreground, (x, y), mask)
-                elif blending_list[i] == "poisson":
+            for i, blending in enumerate(blending_list):
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                img_mask = cv2.erode(pil_to_array_1c(mask), kernel, iterations=1)
+                top_left = (x, y)
+                if blending == "none" or blending == "motion":
+                    backgrounds[i].paste(
+                        foreground, top_left, Image.fromarray(img_mask)
+                    )
+                elif blending == "poisson":
                     offset = (y, x)
-                    img_mask = pil_to_array_1c(mask)
                     img_src = pil_to_array_3c(foreground).astype(np.float64)
                     img_target = pil_to_array_3c(backgrounds[i])
                     img_mask, img_src, offset_adj = pb.create_mask(
-                        img_mask.astype(np.float64), img_target, img_src, offset=offset
+                        img_mask.astype(np.float64), img_target, img_src, offset
                     )
                     background_array = pb.poisson_blend(
                         img_mask,
@@ -246,19 +243,17 @@ def create_image_anno(
                         offset_adj=offset_adj,
                     )
                     backgrounds[i] = Image.fromarray(background_array, "RGB")
-                elif blending_list[i] == "gaussian":
+                elif blending == "gaussian":
                     backgrounds[i].paste(
                         foreground,
-                        (x, y),
-                        Image.fromarray(
-                            cv2.GaussianBlur(pil_to_array_1c(mask), (5, 5), 2)
-                        ),
+                        top_left,
+                        Image.fromarray(cv2.GaussianBlur(img_mask, (5, 5), 2)),
                     )
-                elif blending_list[i] == "box":
+                elif blending == "box":
                     backgrounds[i].paste(
                         foreground,
-                        (x, y),
-                        Image.fromarray(cv2.blur(pil_to_array_1c(mask), (3, 3))),
+                        top_left,
+                        Image.fromarray(cv2.blur(img_mask, (3, 3))),
                     )
             if idx >= len(objects):
                 continue
@@ -277,10 +272,10 @@ def create_image_anno(
             continue
         else:
             break
-    for i in range(len(blending_list)):
-        if blending_list[i] == "motion":
+    for i, blending in enumerate(blending_list):
+        if blending == "motion":
             backgrounds[i] = linear_motion_blur_3c(pil_to_array_3c(backgrounds[i]))
-        backgrounds[i].save(str(img_file).replace("none", blending_list[i]))
+        backgrounds[i].save(str(img_file).replace("none", blending))
 
     with open(anno_file, "w") as f:
         f.write("\n".join(boxes))
@@ -305,27 +300,25 @@ def gen_syn_data(
                         4. Add distractor objects whose annotations are not required
     """
     background_files = list(
-        (CWD / conf["background_dir"]).glob(conf["background_glob_string"])
+        (CWD / conf["background_dir"]).glob(conf["background_glob"])
     )
 
     print(f"Number of background images: {len(background_files)}")
     img_labels = list(zip(img_files, labels, occlusion_coords))
     random.shuffle(img_labels)
 
-    if opt.add_distractors:
+    if opt.distract:
         distractor_list = []
-        for distractor_label in conf["distractor"]:
+        for label in conf["distractor"]:
             distractor_list += list(
-                (CWD / conf["distractor_dir"] / distractor_label).glob(
-                    conf["distractor_glob_string"]
-                )
+                (CWD / conf["distractor_dir"] / label).glob(conf["distractor_glob"])
             )
 
         distractor_files = list(zip(distractor_list, len(distractor_list) * [None]))
         random.shuffle(distractor_files)
     else:
         distractor_files = []
-    print(f"List of distractor files collected: {distractor_files}")
+    print_paths("List of distractor files collected:", distractor_files)
 
     idx = 0
     img_files = []
@@ -334,36 +327,27 @@ def gen_syn_data(
     while len(img_labels) > 0:
         # Get list of objects
         objects = []
-        n = min(
-            random.randint(conf["min_object_num"], conf["max_object_num"]),
-            len(img_labels),
-        )
+        n = constrained_rand_num("object", len(img_labels), conf)
         for _ in range(n):
             objects.append(img_labels.pop())
         # Get list of distractor objects
         distractor_objects = []
-        if opt.add_distractors:
-            n = min(
-                random.randint(conf["min_distractor_num"], conf["max_distractor_num"]),
-                len(distractor_files),
-            )
+        if opt.distract:
+            n = constrained_rand_num("distractor", len(distractor_files), conf)
             for _ in range(n):
                 distractor_objects.append(random.choice(distractor_files))
-            print(f"Chosen distractor objects: {distractor_objects}")
+            print_paths("Chosen distractor objects:", distractor_objects)
 
-        localized_distractor_objects = []
+        localized_distractors = []
         if opt.localized_distractor:
             for obj in objects:
-                if obj[2]:
-                    localized_distractor_objects.append([])
-                    # For each location coord, add a distractor 50% of the time
-                    for coord in obj[2]:
-                        if random.random() < 0.5:
-                            localized_distractor_objects[-1].append(
-                                [random.choice(distractor_files), coord]
-                            )
-                else:
-                    localized_distractor_objects.append(None)
+                localized_distractors.append(
+                    [
+                        (random.choice(distractor_files), coord)
+                        for coord in obj[2]
+                        if random.random() < 1.0
+                    ]
+                )
 
         idx += 1
         bg_file = random.choice(background_files)
@@ -373,7 +357,7 @@ def gen_syn_data(
             params = (
                 objects,
                 distractor_objects,
-                localized_distractor_objects,
+                localized_distractors,
                 img_file,
                 anno_file,
                 bg_file,
@@ -418,8 +402,8 @@ def generate_synthetic_dataset(args):
     labels = get_labels(img_files)
     occlusion_coords = get_occlusion_coords(img_files)
 
-    with open(CONFIG_FILE) as f:
-        conf = yaml.safe_load(f)
+    with open(CONFIG_FILE, "r") as infile:
+        conf = yaml.safe_load(infile)
     if args.selected:
         img_files, labels, occlusion_coords = keep_selected_labels(
             img_files, labels, occlusion_coords, conf
@@ -460,9 +444,14 @@ if __name__ == "__main__":
         action="store_true",
     )
     parser.add_argument(
-        "--scale",
-        help="Add scale augmentation. Default is to add scale augmentation.",
-        action="store_false",
+        "--distract",
+        help="Add distractors objects. Default is to not use distractors",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--occlude",
+        help="Allow objects with full occlusion. Default is to avoid full occlusions",
+        action="store_true",
     )
     parser.add_argument(
         "--rotate",
@@ -470,20 +459,15 @@ if __name__ == "__main__":
         action="store_false",
     )
     parser.add_argument(
+        "--scale",
+        help="Add scale augmentation. Default is to add scale augmentation.",
+        action="store_false",
+    )
+    parser.add_argument(
         "--num",
         help="Number of times each image will be in dataset",
         default=1,
         type=int,
-    )
-    parser.add_argument(
-        "--no_occlusion",
-        help="Add objects without occlusion. Default is to produce occlusions",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--add_distractors",
-        help="Add distractors objects. Default is to not use distractors",
-        action="store_true",
     )
     parser.add_argument(
         "--localized_distractor",

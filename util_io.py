@@ -1,7 +1,40 @@
 import random
 
+import yaml
 
-def get_list_of_images(root_dir, N=1):
+
+def get_labels(imgs):
+    """Get list of labels/object names. Assumes the images in the root directory
+    follow root_dir/<object>/<image> structure. Directory name would be object
+    name.
+
+    Args:
+        imgs(list): List of images being used for synthesis
+    Returns:
+        list: List of labels/object names corresponding to each image
+    """
+    labels = [img_file.parent.stem for img_file in imgs]
+    return labels
+
+
+def get_occlusion_coords(imgs):
+    """Get list of coordinates for localized distractor in each image. 
+    """
+    occlusion_coords = []
+    curr_label = None
+    for img_file in imgs:
+        if curr_label != img_file.parent:
+            curr_label = img_file.parent
+            try:
+                with open(img_file.parent / "occlusion_coords.yaml") as infile:
+                    coords_data = yaml.safe_load(infile)
+            except FileNotFoundError:
+                coords_data = {}
+        occlusion_coords.append(coords_data.get(img_file.name, []))
+    return occlusion_coords
+
+
+def get_list_of_images(root_dir, num):
     """Gets the list of images of objects in the root directory. The expected format
        is root_dir/<object>/<image>.jpg. Adds an image as many times you want it to
        appear in dataset.
@@ -15,8 +48,8 @@ def get_list_of_images(root_dir, N=1):
     """
     img_list = list(root_dir.glob("*/*.jpg"))
     img_list_f = []
-    for _ in range(N):
-        img_list_f = img_list_f + random.sample(img_list, len(img_list))
+    for _ in range(num):
+        img_list_f += random.sample(img_list, len(img_list))
     return img_list_f
 
 
@@ -32,6 +65,12 @@ def get_mask_file(img_file):
         string: Correpsonding mask file path
     """
     return img_file.with_suffix(".pbm")
+
+
+def print_paths(header, paths):
+    print(header)
+    for path, _ in paths:
+        print(f"  {path}")
 
 
 def write_imageset_file(exp_dir, img_files, anno_files):
