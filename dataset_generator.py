@@ -40,7 +40,7 @@ CWD = Path(__file__).resolve().parent
 # random.seed(SEED)
 
 
-def keep_selected_labels(img_files, labels, occlusion_coords, conf):
+def keep_selected_labels(img_files, labels, occ_coords, conf):
     """Filters image files and labels to only retain those that are selected. Useful when one doesn't
        want all objects to be used for synthesis
 
@@ -54,13 +54,13 @@ def keep_selected_labels(img_files, labels, occlusion_coords, conf):
     """
     new_img_files = []
     new_labels = []
-    new_occlusion_coords = []
+    new_occ_coords = []
     for i, img_file in enumerate(img_files):
         if labels[i] in conf["selected"]:
             new_img_files.append(img_file)
             new_labels.append(labels[i])
-            new_occlusion_coords.append(occlusion_coords[i])
-    return new_img_files, new_labels, new_occlusion_coords
+            new_occ_coords.append(occ_coords[i])
+    return new_img_files, new_labels, new_occ_coords
 
 
 def create_image_anno_wrapper(
@@ -188,7 +188,9 @@ def create_image_anno(
                 foreground, mask = rotate_object(foreground, mask, h, w, conf)
                 o_w, o_h = foreground.size
             if opt.perspective:
-                foreground, mask = perspective_transform(foreground, mask, orig_h, orig_w, conf)
+                foreground, mask = perspective_transform(
+                    foreground, mask, o_h, o_w, conf
+                )
                 o_w, o_h = foreground.size
             xmin, xmax, ymin, ymax = get_annotation_from_mask(mask)
             attempt = 0
@@ -242,7 +244,7 @@ def create_image_anno(
 
 
 def gen_syn_data(
-    img_files, labels, occlusion_coords, img_dir, anno_dir, conf, opt,
+    img_files, labels, occ_coords, img_dir, anno_dir, conf, opt,
 ):
     """Creates list of objects and distrctor objects to be pasted on what images.
        Spawns worker processes and generates images according to given params
@@ -264,7 +266,7 @@ def gen_syn_data(
     )
 
     print(f"Number of background images: {len(background_files)}")
-    img_labels = list(zip(img_files, labels, occlusion_coords))
+    img_labels = list(zip(img_files, labels, occ_coords))
     random.shuffle(img_labels)
 
     if opt.distract:
@@ -327,10 +329,7 @@ def gen_syn_data(
             anno_files.append(anno_file)
 
     partial_func = partial(
-        create_image_anno_wrapper,
-        conf=conf,
-        opt=opt,
-        blending_list=conf["blending"],
+        create_image_anno_wrapper, conf=conf, opt=opt, blending_list=conf["blending"],
     )
     p = Pool(conf["num_workers"], init_worker)
     try:
@@ -356,20 +355,20 @@ def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def generate_synthetic_dataset(args):
+def generate_synthetic_dataset(opt):
     """Generate synthetic dataset according to given args"""
-    img_files = get_list_of_images(CWD / args.root, args.num)
+    img_files = get_list_of_images(CWD / opt.root, opt.num)
     labels = get_labels(img_files)
-    occlusion_coords = get_occlusion_coords(img_files)
+    occ_coords = get_occlusion_coords(img_files)
 
     with open(CONFIG_FILE, "r") as infile:
         conf = yaml.safe_load(infile)
-    if args.selected:
-        img_files, labels, occlusion_coords = keep_selected_labels(
-            img_files, labels, occlusion_coords, conf
+    if opt.selected:
+        img_files, labels, occ_coords = keep_selected_labels(
+            img_files, labels, occ_coords, conf
         )
 
-    exp_dir = CWD / args.exp
+    exp_dir = CWD / opt.exp
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     write_labels_file(exp_dir, labels)
@@ -380,53 +379,38 @@ def generate_synthetic_dataset(args):
     img_dir.mkdir(parents=True, exist_ok=True)
 
     syn_img_files, anno_files = gen_syn_data(
-        img_files, labels, occlusion_coords, img_dir, anno_dir, conf, args,
+        img_files, labels, occ_coords, img_dir, anno_dir, conf, opt
     )
     write_imageset_file(exp_dir, syn_img_files, anno_files)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Create dataset with different augmentations"
-    )
-    parser.add_argument(
-        "root", help="The root directory which contains the images and annotations."
-    )
-    parser.add_argument(
-        "exp", help="The directory where images and annotation lists will be created."
-    )
+    parser = argparse.ArgumentParser(description="Create dataset with augmentations")
+    parser.add_argument("root", help="Root directory containing images and annotations")
+    parser.add_argument("exp", help="Output directory for images and annotations")
     parser.add_argument(
         "--selected",
-        help=(
-            "Keep only selected instances in the test dataset. "
-            "Default is to keep all instances in the root directory"
-        ),
+        help="Keep only selected instances in the test dataset. Default False",
         action="store_true",
     )
     parser.add_argument(
-        "--distract",
-        help="Add distractors objects. Default is to not use distractors",
-        action="store_true",
+        "--distract", help="Add distractors objects. Default False", action="store_true"
     )
     parser.add_argument(
         "--occlude",
-        help="Allow objects with full occlusion. Default is to avoid full occlusions",
+        help="Allow objects with full occlusion. Default False",
         action="store_true",
     )
     parser.add_argument(
         "--perspective",
-        help="Add rotation augmentation. Default is to add rotation augmentation.",
+        help="Add perspective transform. Default True",
         action="store_false",
     )
     parser.add_argument(
-        "--rotate",
-        help="Add rotation augmentation. Default is to add rotation augmentation.",
-        action="store_false",
+        "--rotate", help="Add rotation augmentation. Default True", action="store_false"
     )
     parser.add_argument(
-        "--scale",
-        help="Add scale augmentation. Default is to add scale augmentation.",
-        action="store_false",
+        "--scale", help="Add scale augmentation. Default True", action="store_false"
     )
     parser.add_argument(
         "--num",
@@ -436,10 +420,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--localized_distractor",
-        help=(
-            "Add occluding distractors to specified spots. "
-            "Default is to not localize distractors"
-        ),
+        help="Add occluding distractors to specified spots. Default False",
         action="store_true",
     )
     opt = parser.parse_args()

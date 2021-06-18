@@ -13,8 +13,7 @@ def get_labels(imgs):
     Returns:
         list: List of labels/object names corresponding to each image
     """
-    labels = [img_file.parent.stem for img_file in imgs]
-    return labels
+    return [img_file.parent.stem for img_file in imgs]
 
 
 def get_occlusion_coords(imgs):

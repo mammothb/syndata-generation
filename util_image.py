@@ -3,7 +3,7 @@ import random
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from pb import pb
 from pyblur import pyblur
@@ -53,8 +53,15 @@ def add_localized_distractor(
         foreground = foreground.rotate(rot_degrees, expand=True)
         mask = mask.rotate(rot_degrees, expand=True)
         o_w, o_h = foreground.size
-    x = int(fg_size[0] * distractor[1][1] - o_w / 2)
-    y = int(fg_size[1] * distractor[1][0] - o_h / 2)
+    x = int(fg_size[0] * distractor[1][1] - o_w / 2 + 1)
+    y = int(fg_size[1] * distractor[1][0] - o_h / 2 + 1)
+    pad = -min(x, fg_size[0] - x - o_w, y, fg_size[1] - y - o_h)
+    if pad > 0:
+        dst_size = (fg_size[0] + 2 * pad, fg_size[1] + 2 * pad)
+        object_foreground = ImageOps.pad(object_foreground, dst_size)
+        object_mask = ImageOps.pad(object_mask, dst_size)
+        x += pad
+        y += pad
     object_foreground.paste(foreground, (x, y), mask)
     object_mask.paste(mask, (x, y), mask)
     return object_foreground, object_mask
