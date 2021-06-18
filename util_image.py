@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from pb import pb
 from pyblur import pyblur
 from util_io import get_mask_file
 
@@ -59,6 +60,36 @@ def add_localized_distractor(
     return object_foreground, object_mask
 
 
+def blend_object(blending, background, foreground, mask, x, y):
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    img_mask = cv2.erode(pil_to_array_1c(mask), kernel, iterations=1)
+    top_left = (x, y)
+    if blending == "none" or blending == "motion":
+        background.paste(foreground, top_left, Image.fromarray(img_mask))
+    elif blending == "poisson":
+        offset = (y, x)
+        img_src = pil_to_array_3c(foreground).astype(np.float64)
+        img_target = pil_to_array_3c(background)
+        img_mask, img_src, offset_adj = pb.create_mask(
+            img_mask.astype(np.float64), img_target, img_src, offset
+        )
+        background_array = pb.poisson_blend(
+            img_mask, img_src, img_target, method="normal", offset_adj=offset_adj,
+        )
+        background = Image.fromarray(background_array, "RGB")
+    elif blending == "gaussian":
+        background.paste(
+            foreground,
+            top_left,
+            Image.fromarray(cv2.GaussianBlur(img_mask, (5, 5), 2)),
+        )
+    elif blending == "box":
+        background.paste(
+            foreground, top_left, Image.fromarray(cv2.blur(img_mask, (3, 3))),
+        )
+    return background
+
+
 def get_annotation_from_mask(mask):
     """Given a mask, this returns the bounding box annotations
 
@@ -110,6 +141,7 @@ def get_annotation_from_mask_file(mask_file, inverted_mask, scale=1.0):
 def invert_mask(mask):
     return Image.fromarray(255 - pil_to_array_1c(mask)).convert("1")
 
+
 def linear_motion_blur_3c(img):
     """Performs motion blur on an image with 3 channels. Used to simulate
        blurring caused due to motion of camera.
@@ -134,6 +166,33 @@ def linear_motion_blur_3c(img):
         )
     blurred_img = Image.fromarray(blurred_img, "RGB")
     return blurred_img
+
+
+def perspective_transform(foreground, mask, orig_h, orig_w, conf):
+    M = np.eye(3)
+    # x perspective (about y)
+    M[2, 0] = random.uniform(-conf["max_perspective"], conf["max_perspective"])
+    # y perspective (about x)
+    M[2, 1] = random.uniform(-conf["max_perspective"], conf["max_perspective"])
+    coords = np.array([[0, 0], [orig_w, 0], [0, orig_h], [orig_w, orig_h]])
+    max_w = 0
+    max_h = 0
+    for coord in coords:
+        denom = M[2, 0] * coord[0] + M[2, 1] * coord[1] + M[2, 2]
+        max_w = max(max_w, coord[0] / denom)
+        max_h = max(max_h, coord[1] / denom)
+    max_w = int(max_w + 1)
+    max_h = int(max_h + 1)
+    foreground = Image.fromarray(
+        cv2.warpPerspective(pil_to_array_3c(foreground), M, dsize=(max_w, max_h))
+    )
+    mask = Image.fromarray(
+        cv2.warpPerspective(pil_to_array_1c(mask), M, dsize=(max_w, max_h))
+    )
+    if max_h > orig_h or max_w > orig_w:
+        foreground = foreground.resize((orig_w, orig_h), Image.ANTIALIAS)
+        mask = mask.resize((orig_w, orig_h), Image.ANTIALIAS)
+    return foreground, mask
 
 
 def pil_to_array_1c(img):
@@ -172,3 +231,27 @@ def random_angle(kernel_dim):
     valid_line_angles = np.linspace(0, 180, num_lines, endpoint=False)
     angle_idx = np.random.randint(0, len(valid_line_angles))
     return int(valid_line_angles[angle_idx])
+
+
+def rotate_object(foreground, mask, h, w, conf):
+    while True:
+        rot_degrees = random.randint(-conf["max_degrees"], conf["max_degrees"])
+        foreground_tmp = foreground.rotate(rot_degrees, expand=True)
+        mask_tmp = mask.rotate(rot_degrees, expand=True)
+        o_w, o_h = foreground_tmp.size
+        if w - o_w > 0 and h - o_h > 0:
+            break
+    return foreground_tmp, mask_tmp
+
+
+def scale_object(foreground, mask, h, w, orig_h, orig_w, conf):
+    while True:
+        scale = random.uniform(conf["min_scale"], conf["max_scale"])
+        o_w, o_h = int(scale * orig_w), int(scale * orig_h)
+        if w - o_w > 0 and h - o_h > 0 and o_w > 0 and o_h > 0:
+            break
+    return (
+        foreground.resize((o_w, o_h), Image.ANTIALIAS),
+        mask.resize((o_w, o_h), Image.ANTIALIAS),
+    )
+

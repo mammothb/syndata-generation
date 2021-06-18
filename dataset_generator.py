@@ -6,23 +6,22 @@ from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 
-import cv2
-import numpy as np
-import scipy
 import yaml
 from PIL import Image
 
 from defaults import CONFIG_FILE
-from pb import pb
 from util_bbox import overlap
 from util_image import (
     add_localized_distractor,
+    blend_object,
     get_annotation_from_mask,
     get_annotation_from_mask_file,
     invert_mask,
     linear_motion_blur_3c,
-    pil_to_array_1c,
+    perspective_transform,
     pil_to_array_3c,
+    scale_object,
+    rotate_object,
 )
 from util_io import (
     get_labels,
@@ -37,8 +36,8 @@ from util_io import (
 
 Rectangle = namedtuple("Rectangle", "xmin ymin xmax ymax")
 CWD = Path(__file__).resolve().parent
-SEED = 123
-random.seed(SEED)
+# SEED = 123
+# random.seed(SEED)
 
 
 def keep_selected_labels(img_files, labels, occlusion_coords, conf):
@@ -68,7 +67,7 @@ def create_image_anno_wrapper(
     args, conf, opt, blending_list=["none"],
 ):
     """Wrapper used to pass params to workers"""
-    return create_image_anno(*args, conf, opt, blending_list=blending_list,)
+    return create_image_anno(*args, conf, opt, blending_list=blending_list)
 
 
 def constrained_randint(frac, fg_dim, bg_dim):
@@ -168,8 +167,10 @@ def create_image_anno(
                         foreground,
                         mask,
                     )
+                xmin, xmax, ymin, ymax = get_annotation_from_mask(mask)
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
             mask = mask.crop((xmin, ymin, xmax, ymax))
+            orig_w, orig_h = foreground.size
             rel_scale = 1
             if orig_w > orig_h and orig_w > w * 0.75:
                 rel_scale = w * 0.75 / orig_w
@@ -180,25 +181,15 @@ def create_image_anno(
             mask = mask.resize((orig_w, orig_h), Image.ANTIALIAS)
             o_w, o_h = orig_w, orig_h
             if opt.scale:
-                while True:
-                    scale = random.uniform(conf["min_scale"], conf["max_scale"])
-                    o_w, o_h = int(scale * orig_w), int(scale * orig_h)
-                    if w - o_w > 0 and h - o_h > 0 and o_w > 0 and o_h > 0:
-                        break
-                foreground = foreground.resize((o_w, o_h), Image.ANTIALIAS)
-                mask = mask.resize((o_w, o_h), Image.ANTIALIAS)
+                foreground, mask = scale_object(
+                    foreground, mask, h, w, orig_h, orig_w, conf
+                )
             if opt.rotate:
-                while True:
-                    rot_degrees = random.randint(
-                        -conf["max_degrees"], conf["max_degrees"]
-                    )
-                    foreground_tmp = foreground.rotate(rot_degrees, expand=True)
-                    mask_tmp = mask.rotate(rot_degrees, expand=True)
-                    o_w, o_h = foreground_tmp.size
-                    if w - o_w > 0 and h - o_h > 0:
-                        break
-                mask = mask_tmp
-                foreground = foreground_tmp
+                foreground, mask = rotate_object(foreground, mask, h, w, conf)
+                o_w, o_h = foreground.size
+            if opt.perspective:
+                foreground, mask = perspective_transform(foreground, mask, orig_h, orig_w, conf)
+                o_w, o_h = foreground.size
             xmin, xmax, ymin, ymax = get_annotation_from_mask(mask)
             attempt = 0
             while True:
@@ -221,40 +212,9 @@ def create_image_anno(
             if not opt.occlude:
                 already_syn.append([x + xmin, x + xmax, y + ymin, y + ymax])
             for i, blending in enumerate(blending_list):
-                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                img_mask = cv2.erode(pil_to_array_1c(mask), kernel, iterations=1)
-                top_left = (x, y)
-                if blending == "none" or blending == "motion":
-                    backgrounds[i].paste(
-                        foreground, top_left, Image.fromarray(img_mask)
-                    )
-                elif blending == "poisson":
-                    offset = (y, x)
-                    img_src = pil_to_array_3c(foreground).astype(np.float64)
-                    img_target = pil_to_array_3c(backgrounds[i])
-                    img_mask, img_src, offset_adj = pb.create_mask(
-                        img_mask.astype(np.float64), img_target, img_src, offset
-                    )
-                    background_array = pb.poisson_blend(
-                        img_mask,
-                        img_src,
-                        img_target,
-                        method="normal",
-                        offset_adj=offset_adj,
-                    )
-                    backgrounds[i] = Image.fromarray(background_array, "RGB")
-                elif blending == "gaussian":
-                    backgrounds[i].paste(
-                        foreground,
-                        top_left,
-                        Image.fromarray(cv2.GaussianBlur(img_mask, (5, 5), 2)),
-                    )
-                elif blending == "box":
-                    backgrounds[i].paste(
-                        foreground,
-                        top_left,
-                        Image.fromarray(cv2.blur(img_mask, (3, 3))),
-                    )
+                backgrounds[i] = blend_object(
+                    blending, backgrounds[i], foreground, mask, x, y
+                )
             if idx >= len(objects):
                 continue
             x_min = max(1, x + xmin)
@@ -366,25 +326,25 @@ def gen_syn_data(
             img_files.append(img_file)
             anno_files.append(anno_file)
 
-    # partial_func = partial(
-    #     create_image_anno_wrapper,
-    #     conf=conf,
-    #     opt=opt,
-    #     blending_list=conf["blending"],
-    # )
-    # p = Pool(conf["num_workers"], init_worker)
-    # try:
-    #     p.map(partial_func, params_list)
-    # except KeyboardInterrupt:
-    #     print("....\nCaught KeyboardInterrupt, terminating workers")
-    #     p.terminate()
-    # else:
-    #     p.close()
-    # p.join()
-    for params in params_list:
-        create_image_anno_wrapper(
-            params, conf=conf, opt=opt, blending_list=conf["blending"],
-        )
+    partial_func = partial(
+        create_image_anno_wrapper,
+        conf=conf,
+        opt=opt,
+        blending_list=conf["blending"],
+    )
+    p = Pool(conf["num_workers"], init_worker)
+    try:
+        p.map(partial_func, params_list)
+    except KeyboardInterrupt:
+        print("....\nCaught KeyboardInterrupt, terminating workers")
+        p.terminate()
+    else:
+        p.close()
+    p.join()
+    # for params in params_list:
+    #     create_image_anno_wrapper(
+    #         params, conf=conf, opt=opt, blending_list=conf["blending"],
+    #     )
 
     return img_files, anno_files
 
@@ -452,6 +412,11 @@ if __name__ == "__main__":
         "--occlude",
         help="Allow objects with full occlusion. Default is to avoid full occlusions",
         action="store_true",
+    )
+    parser.add_argument(
+        "--perspective",
+        help="Add rotation augmentation. Default is to add rotation augmentation.",
+        action="store_false",
     )
     parser.add_argument(
         "--rotate",
