@@ -259,6 +259,7 @@ def gen_syn_data(
     Args:
         img_files(list): List of image files
         labels(list): List of labels for each image
+        occ_coords(list): List of coordinates for localized distractor
         img_dir(str): Directory where synthesized images will be stored
         anno_dir(str): Directory where corresponding annotations will be stored
         conf(dict): Config options
