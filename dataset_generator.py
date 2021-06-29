@@ -147,6 +147,7 @@ def create_image_anno(
             mask = Image.open(mask_file)
             if conf["inverted_mask"]:
                 mask = invert_mask(mask)
+            mask_bb = mask.copy()
             if (
                 xmin == -1
                 or ymin == -1
@@ -154,11 +155,12 @@ def create_image_anno(
                 or ymax - ymin < conf["min_height"]
             ):
                 continue
-            foreground_crop = foreground.crop((xmin, ymin, xmax, ymax))
-            orig_w, orig_h = foreground_crop.size
+            # foreground_crop = foreground.crop((xmin, ymin, xmax, ymax))
+            # orig_w, orig_h = foreground_crop.size
+            orig_w, orig_h = xmax - xmin, ymax - ymin
             if idx < len(objects) and localized_distractors[idx]:
                 for distractor in localized_distractors[idx]:
-                    foreground, mask = add_localized_distractor(
+                    foreground, mask, mask_bb = add_localized_distractor(
                         distractor,
                         foreground.size,
                         (orig_w, orig_h),
@@ -166,10 +168,12 @@ def create_image_anno(
                         opt,
                         foreground,
                         mask,
+                        mask_bb,
                     )
                 xmin, xmax, ymin, ymax = get_annotation_from_mask(mask)
             foreground = foreground.crop((xmin, ymin, xmax, ymax))
             mask = mask.crop((xmin, ymin, xmax, ymax))
+            mask_bb = mask_bb.crop((xmin, ymin, xmax, ymax))
             orig_w, orig_h = foreground.size
             rel_scale = 1
             if orig_w > orig_h and orig_w > w * 0.75:
@@ -179,20 +183,23 @@ def create_image_anno(
             orig_w, orig_h = int(orig_w * rel_scale), int(orig_h * rel_scale)
             foreground = foreground.resize((orig_w, orig_h), Image.ANTIALIAS)
             mask = mask.resize((orig_w, orig_h), Image.ANTIALIAS)
+            mask_bb = mask_bb.resize((orig_w, orig_h), Image.ANTIALIAS)
             o_w, o_h = orig_w, orig_h
             if opt.scale:
-                foreground, mask = scale_object(
-                    foreground, mask, h, w, orig_h, orig_w, conf
+                foreground, mask, mask_bb = scale_object(
+                    foreground, mask, mask_bb, h, w, orig_h, orig_w, conf
                 )
             if opt.rotate:
-                foreground, mask = rotate_object(foreground, mask, h, w, conf)
-                o_w, o_h = foreground.size
-            if opt.perspective:
-                foreground, mask = perspective_transform(
-                    foreground, mask, o_h, o_w, conf
+                foreground, mask, mask_bb = rotate_object(
+                    foreground, mask, mask_bb, h, w, conf
                 )
                 o_w, o_h = foreground.size
-            xmin, xmax, ymin, ymax = get_annotation_from_mask(mask)
+            if opt.perspective:
+                foreground, mask, mask_bb = perspective_transform(
+                    foreground, mask, mask_bb, o_h, o_w, conf
+                )
+                o_w, o_h = foreground.size
+            xmin, xmax, ymin, ymax = get_annotation_from_mask(mask_bb)
             attempt = 0
             while True:
                 attempt += 1
