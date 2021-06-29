@@ -15,7 +15,10 @@ def overlap(a, b, max_allowed_iou):
     if (
         dx >= 0
         and dy >= 0
-        and float(dx * dy) > max_allowed_iou * (a.xmax - a.xmin) * (a.ymax - a.ymin)
+        and (
+            float(dx * dy) > max_allowed_iou * (a.xmax - a.xmin) * (a.ymax - a.ymin)
+            or float(dx * dy) > max_allowed_iou * (b.xmax - b.xmin) * (b.ymax - b.ymin)
+        )
     ):
         return True
     else:

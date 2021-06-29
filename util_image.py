@@ -11,7 +11,14 @@ from util_io import get_mask_file
 
 
 def add_localized_distractor(
-    distractor, fg_size, fg_crop_size, conf, opt, object_foreground, object_mask
+    distractor,
+    fg_size,
+    fg_crop_size,
+    conf,
+    opt,
+    object_foreground,
+    object_mask,
+    object_mask_bb,
 ):
     """
     Args:
@@ -60,11 +67,12 @@ def add_localized_distractor(
         dst_size = (fg_size[0] + 2 * pad, fg_size[1] + 2 * pad)
         object_foreground = ImageOps.pad(object_foreground, dst_size)
         object_mask = ImageOps.pad(object_mask, dst_size)
+        object_mask_bb = ImageOps.pad(object_mask_bb, dst_size)
         x += pad
         y += pad
     object_foreground.paste(foreground, (x, y), mask)
     object_mask.paste(mask, (x, y), mask)
-    return object_foreground, object_mask
+    return object_foreground, object_mask, object_mask_bb
 
 
 def blend_object(blending, background, foreground, mask, x, y):
@@ -175,7 +183,7 @@ def linear_motion_blur_3c(img):
     return blurred_img
 
 
-def perspective_transform(foreground, mask, orig_h, orig_w, conf):
+def perspective_transform(foreground, mask, mask_bb, orig_h, orig_w, conf):
     M = np.eye(3)
     # x perspective (about y)
     M[2, 0] = random.uniform(-conf["max_perspective"], conf["max_perspective"])
@@ -196,10 +204,16 @@ def perspective_transform(foreground, mask, orig_h, orig_w, conf):
     mask = Image.fromarray(
         cv2.warpPerspective(pil_to_array_1c(mask), M, dsize=(max_w, max_h))
     )
+    mask_bb = Image.fromarray(
+        cv2.warpPerspective(
+            pil_to_array_1c(mask_bb), M, dsize=(max_w, max_h)
+        )
+    )
     if max_h > orig_h or max_w > orig_w:
         foreground = foreground.resize((orig_w, orig_h), Image.ANTIALIAS)
         mask = mask.resize((orig_w, orig_h), Image.ANTIALIAS)
-    return foreground, mask
+        mask_bb = mask_bb.resize((orig_w, orig_h), Image.ANTIALIAS)
+    return foreground, mask, mask_bb
 
 
 def pil_to_array_1c(img):
@@ -240,18 +254,20 @@ def random_angle(kernel_dim):
     return int(valid_line_angles[angle_idx])
 
 
-def rotate_object(foreground, mask, h, w, conf):
+def rotate_object(foreground, mask, mask_bb, h, w, conf):
     while True:
         rot_degrees = random.randint(-conf["max_degrees"], conf["max_degrees"])
-        foreground_tmp = foreground.rotate(rot_degrees, expand=True)
+        # foreground_tmp = foreground.rotate(rot_degrees, expand=True)
         mask_tmp = mask.rotate(rot_degrees, expand=True)
-        o_w, o_h = foreground_tmp.size
+        o_w, o_h = mask_tmp.size
         if w - o_w > 0 and h - o_h > 0:
             break
-    return foreground_tmp, mask_tmp
+    foreground = foreground.rotate(rot_degrees, expand=True)
+    mask_bb = mask_bb.rotate(rot_degrees, expand=True)
+    return foreground, mask_tmp, mask_bb
 
 
-def scale_object(foreground, mask, h, w, orig_h, orig_w, conf):
+def scale_object(foreground, mask, mask_bb, h, w, orig_h, orig_w, conf):
     while True:
         scale = random.uniform(conf["min_scale"], conf["max_scale"])
         o_w, o_h = int(scale * orig_w), int(scale * orig_h)
@@ -260,5 +276,6 @@ def scale_object(foreground, mask, h, w, orig_h, orig_w, conf):
     return (
         foreground.resize((o_w, o_h), Image.ANTIALIAS),
         mask.resize((o_w, o_h), Image.ANTIALIAS),
+        mask_bb.resize((o_w, o_h), Image.ANTIALIAS),
     )
 
